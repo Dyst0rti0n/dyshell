@@ -5,12 +5,6 @@ Dyshell is a highly customizable interactive shell built using Go. It offers a r
 
 ---
 
-### Dyshell: A Customizable Interactive Shell
-
-Welcome to Dyshell, a feature-rich and customizable interactive shell built with Go. Whether you're a developer looking for a flexible shell environment or just someone who loves to customize their command line experience, Dyshell has something for you.
-
----
-
 ### Features
 
 - **Built-in Commands**: Essential commands like `echo`, `exit`, `pwd`, `cd`, `ls`, `cat`, `touch`, `rm`, `mkdir`, `rmdir`, `history`, `clear`, `alias`, `unalias`, `export`, `unset`, `jobs`, `fg`, `bg`, `kill`.
