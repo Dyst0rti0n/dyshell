@@ -36,9 +36,9 @@ var (
 	shellTextBold    bool
 	shellPromptStyle string
 
-	app        *tview.Application
-	textView   *tview.TextView
-	inputField *tview.InputField
+	app      *tview.Application
+	textView *tview.TextView
+	input    string
 )
 
 func init() {
@@ -46,29 +46,29 @@ func init() {
 	envVars = make(map[string]string)
 	commandCache = make(map[string]string)
 	builtins = map[string]bool{
-		"echo":        true,
-		"exit":        true,
-		"type":        true,
-		"pwd":         true,
-		"cd":          true,
-		"whoami":      true,
-		"ls":          true,
-		"cat":         true,
-		"touch":       true,
-		"rm":          true,
-		"mkdir":       true,
-		"rmdir":       true,
-		"history":     true,
-		"clear":       true,
-		"alias":       true,
-		"unalias":     true,
-		"export":      true,
-		"unset":       true,
-		"jobs":        true,
-		"fg":          true,
-		"bg":          true,
-		"kill":        true,
-		"shell":       true, // Added shell customization command
+		"echo":    true,
+		"exit":    true,
+		"type":    true,
+		"pwd":     true,
+		"cd":      true,
+		"whoami":  true,
+		"ls":      true,
+		"cat":     true,
+		"touch":   true,
+		"rm":      true,
+		"mkdir":   true,
+		"rmdir":   true,
+		"history": true,
+		"clear":   true,
+		"alias":   true,
+		"unalias": true,
+		"export":  true,
+		"unset":   true,
+		"jobs":    true,
+		"fg":      true,
+		"bg":      true,
+		"kill":    true,
+		"shell":   true, // Added shell customization command
 	}
 
 	// Default customization settings
@@ -125,42 +125,46 @@ func main() {
 
 	textView.SetBorder(true).SetTitle("Dyshell")
 
-	inputField = tview.NewInputField().
-		SetFieldBackgroundColor(tcell.ColorBlack).
-		SetFieldTextColor(tcell.ColorWhite).
-		SetFieldWidth(0) // Dynamic width
-
-	// Input handling
-	inputField.SetDoneFunc(func(key tcell.Key) {
-		if key == tcell.KeyEnter {
-			cmdLine := inputField.GetText()
-			inputField.SetText("")
+	// Capture key events for input
+	textView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyEnter:
+			cmdLine := strings.TrimSpace(input)
+			input = ""
+			fmt.Fprint(textView, "\n")
 			handleCommand(cmdLine)
-		} else if key == tcell.KeyCtrlC {
-			app.Stop()
+		case tcell.KeyBackspace, tcell.KeyBackspace2:
+			if len(input) > 0 {
+				input = input[:len(input)-1]
+			}
+		case tcell.KeyRune:
+			input += string(event.Rune())
 		}
+		updatePrompt()
+		return nil
 	})
 
-	// Set up layout
-	flex := tview.NewFlex().
-		SetDirection(tview.FlexRow).
-		AddItem(textView, 0, 1, false).
-		AddItem(inputField, 1, 1, true)
-
-	// Set focus to the input field
-	app.SetFocus(inputField)
-
 	// Initial prompt
-	fmt.Fprint(textView, "> ")
+	updatePrompt()
 
-	if err := app.SetRoot(flex, true).EnableMouse(true).Run(); err != nil {
+	if err := app.SetRoot(textView, true).EnableMouse(true).Run(); err != nil {
 		panic(err)
 	}
+}
+
+func updatePrompt() {
+	textView.Clear()
+	fmt.Fprintf(textView, "%s%s", getPrompt(), input)
+}
+
+func getPrompt() string {
+	return "> "
 }
 
 func handleCommand(cmdLine string) {
 	cmdLine = strings.TrimSpace(cmdLine)
 	if cmdLine == "" {
+		updatePrompt()
 		return
 	}
 
@@ -238,7 +242,7 @@ func handleCommand(cmdLine string) {
 	}
 
 	// Display prompt again
-	fmt.Fprint(textView, "\n> ")
+	updatePrompt()
 	app.Draw()
 }
 
