@@ -131,7 +131,6 @@ func main() {
 		case tcell.KeyEnter:
 			cmdLine := strings.TrimSpace(input)
 			input = ""
-			fmt.Fprint(textView, "\n")
 			handleCommand(cmdLine)
 		case tcell.KeyBackspace, tcell.KeyBackspace2:
 			if len(input) > 0 {
@@ -154,7 +153,7 @@ func main() {
 
 func updatePrompt() {
 	textView.Clear()
-	fmt.Fprintf(textView, "%s%s", getPrompt(), input)
+	fmt.Fprintf(textView, "%s%s_", getPrompt(), input) // Added cursor indicator "_"
 }
 
 func getPrompt() string {
