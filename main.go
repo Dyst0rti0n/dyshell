@@ -105,9 +105,6 @@ func main() {
 	}
 
 	homeDir := currentUser.HomeDir
-	username := currentUser.Username
-
-	fmt.Printf("Welcome to your personalized shell, %s!\n", username)
 
 	// Load aliases and environment variables from file
 	loadAliasesAndEnvVars(filepath.Join(homeDir, ".my_shell_aliases"))
@@ -131,6 +128,7 @@ func main() {
 		case tcell.KeyEnter:
 			cmdLine := strings.TrimSpace(input)
 			input = ""
+			fmt.Fprint(textView, "\n") // Add newline before handling command
 			handleCommand(cmdLine)
 		case tcell.KeyBackspace, tcell.KeyBackspace2:
 			if len(input) > 0 {
@@ -154,6 +152,7 @@ func main() {
 func updatePrompt() {
 	textView.Clear()
 	fmt.Fprintf(textView, "%s%s_", getPrompt(), input) // Added cursor indicator "_"
+	app.Draw() // Explicitly draw the application
 }
 
 func getPrompt() string {
@@ -161,6 +160,7 @@ func getPrompt() string {
 }
 
 func handleCommand(cmdLine string) {
+	fmt.Fprintf(textView, "Executing command: %s\n", cmdLine) // Debugging statement
 	cmdLine = strings.TrimSpace(cmdLine)
 	if cmdLine == "" {
 		updatePrompt()
@@ -221,7 +221,7 @@ func handleCommand(cmdLine string) {
 					executeExternalCommand(path, args[1:], writer)
 				} else {
 					pathEnv := os.Getenv("PATH")
-					paths := strings.Split(pathEnv, ";")
+					paths := strings.Split(pathEnv, string(os.PathListSeparator))
 					found := false
 					for _, path := range paths {
 						fullPath := filepath.Join(path, cmd)
@@ -242,7 +242,6 @@ func handleCommand(cmdLine string) {
 
 	// Display prompt again
 	updatePrompt()
-	app.Draw()
 }
 
 // executeBuiltinCommand executes built-in shell commands.
@@ -265,7 +264,7 @@ func executeBuiltinCommand(cmd string, args []string, writer io.Writer) {
 					fmt.Fprintf(writer, "%s is %s\n", arg, path)
 				} else {
 					pathEnv := os.Getenv("PATH")
-					paths := strings.Split(pathEnv, ";")
+					paths := strings.Split(pathEnv, string(os.PathListSeparator))
 					found := false
 					for _, path := range paths {
 						fullPath := filepath.Join(path, arg)
@@ -299,8 +298,10 @@ func executeBuiltinCommand(cmd string, args []string, writer io.Writer) {
 			if err != nil {
 				fmt.Fprintf(writer, "cd: %s: No such file or directory\n", dir)
 			}
+			updatePrompt() // Add this line to update the prompt after changing directory
 		} else {
 			os.Chdir(userHomeDir())
+			updatePrompt() // Add this line to update the prompt after changing directory
 		}
 	case "whoami":
 		user, err := user.Current()
@@ -659,7 +660,7 @@ func (a *AutoCompleter) Do(line []rune, pos int) ([][]rune, int) {
 		}
 	}
 	pathEnv := os.Getenv("PATH")
-	paths := strings.Split(pathEnv, ";")
+	paths := strings.Split(pathEnv, string(os.PathListSeparator))
 	for _, path := range paths {
 		files, err := os.ReadDir(path)
 		if err != nil {
