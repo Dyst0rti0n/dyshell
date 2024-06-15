@@ -17,6 +17,7 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+	"github.com/chzyer/readline"
 )
 
 var (
@@ -28,6 +29,7 @@ var (
 	mu              sync.Mutex
 	commandCache    map[string]string
 	cacheExpiration time.Duration = 5 * time.Minute
+	completer 		*readline.PrefixCompleter
 
 	// Customization variables
 	shellBgOpacity   int
@@ -40,6 +42,28 @@ var (
 	textView *tview.TextView
 	input    string
 )
+
+func getAllCommands() []string {
+    commands := make([]string, 0, len(builtins))
+
+    for cmd := range builtins {
+        commands = append(commands, cmd)
+    }
+
+    pathEnv := os.Getenv("PATH")
+    paths := strings.Split(pathEnv, string(os.PathListSeparator))
+    for _, path := range paths {
+        files, err := os.ReadDir(path)
+        if err != nil {
+            continue
+        }
+        for _, file := range files {
+            commands = append(commands, file.Name())
+        }
+    }
+
+    return commands
+}
 
 func init() {
 	aliases = make(map[string]string)
@@ -78,6 +102,11 @@ func init() {
 	shellTextBold = false
 	shellPromptStyle = "default"
 
+	completer = readline.NewPrefixCompleter()
+    for _, cmd := range getAllCommands() {
+        completer.Children = append(completer.Children, readline.PcItem(cmd))
+    }
+	
 	go startCPUProfile()
 }
 
@@ -136,6 +165,33 @@ func main() {
 			}
 		case tcell.KeyRune:
 			input += string(event.Rune())
+		case tcell.KeyUp:
+			if len(history) > 0 {
+				if input == "" {
+					input = history[len(history)-1]
+				} else {
+					for i := len(history) - 1; i >= 0; i-- {
+						if history[i] == input && i > 0 {
+							input = history[i-1]
+							break
+						}
+					}
+				}
+			}
+		case tcell.KeyDown:
+			if len(history) > 0 {
+				for i := 0; i < len(history); i++ {
+					if history[i] == input && i < len(history)-1 {
+						input = history[i+1]
+						break
+					}
+				}
+			}
+		case tcell.KeyTab:
+			suggestions, _ := completer.Do([]rune(input), len(input))
+			if len(suggestions) > 0 {
+				input = string(suggestions[0])
+			}
 		}
 		updatePrompt()
 		return nil
@@ -150,8 +206,12 @@ func main() {
 }
 
 func updatePrompt() {
+	currentDir, err := os.Getwd()
+	if err != nil {
+		currentDir = "~"
+	}
 	textView.Clear()
-	fmt.Fprintf(textView, "%s%s_", getPrompt(), input) // Added cursor indicator "_"
+	fmt.Fprintf(textView, "%s %s%s_", currentDir, getPrompt(), input) // Added cursor indicator "_"
 	app.Draw() // Explicitly draw the application
 }
 
@@ -160,89 +220,105 @@ func getPrompt() string {
 }
 
 func handleCommand(cmdLine string) {
-	fmt.Fprintf(textView, "Executing command: %s\n", cmdLine) // Debugging statement
-	cmdLine = strings.TrimSpace(cmdLine)
-	if cmdLine == "" {
-		updatePrompt()
-		return
-	}
+    fmt.Fprintf(textView, "Executing command: %s\n", cmdLine) // Debugging statement
+    cmdLine = strings.TrimSpace(cmdLine)
+    if cmdLine == "" {
+        updatePrompt()
+        return
+    }
 
-	// Save command to history
-	mu.Lock()
-	history = append(history, cmdLine)
-	mu.Unlock()
+    // Save command to history
+    mu.Lock()
+    history = append(history, cmdLine)
+    mu.Unlock()
 
-	// Perform command substitution
-	cmdLine = substituteCommand(cmdLine)
+    // Perform command substitution
+    cmdLine = substituteCommand(cmdLine)
 
-	// Expand environment variables
-	cmdLine = os.ExpandEnv(cmdLine)
+    // Expand environment variables
+    cmdLine = os.ExpandEnv(cmdLine)
 
-	// Capture output
-	output := new(strings.Builder)
-	writer := io.MultiWriter(output, textView)
+    // Check for multiline command
+    if strings.HasSuffix(cmdLine, "\\") {
+        input += "\n"
+        updatePrompt()
+        return
+    }
 
-	// Execute built-in command
-	args := strings.Split(cmdLine, " ")
-	cmd := args[0]
+    // Check for piped commands
+    if strings.Contains(cmdLine, "|") {
+        executePipedCommands(cmdLine)
+        updatePrompt()
+        return
+    }
 
-	// Check for aliases
-	if aliasCmd, ok := aliases[cmd]; ok {
-		cmd = aliasCmd
-		args = append([]string{cmd}, args[1:]...)
-	}
+    // Capture output
+    output := new(strings.Builder)
+    writer := io.MultiWriter(output, textView)
 
-	if builtins[cmd] {
-		executeBuiltinCommand(cmd, args[1:], writer)
-	} else {
-		// Check for background job
-		if strings.HasSuffix(cmdLine, "&") {
-			cmdLine = strings.TrimSuffix(cmdLine, "&")
-			args = strings.Fields(cmdLine)
-			cmd := exec.Command(args[0], args[1:]...)
-			cmd.Stdout = writer
-			cmd.Stderr = writer
-			err := cmd.Start()
-			if err == nil {
-				mu.Lock()
-				jobs = append(jobs, cmd)
-				mu.Unlock()
-				fmt.Fprintf(writer, "[%d] %d\n", len(jobs), cmd.Process.Pid)
-			} else {
-				fmt.Fprintf(writer, "%s: %v\n", cmd.Args[0], err)
-			}
-		} else {
-			// Check for redirection
-			if strings.Contains(cmdLine, ">") || strings.Contains(cmdLine, "<") {
-				executeRedirectedCommand(cmdLine, writer)
-			} else {
-				// Search for the command in PATH and execute it
-				if path, found := getCachedCommandPath(cmd); found {
-					executeExternalCommand(path, args[1:], writer)
-				} else {
-					pathEnv := os.Getenv("PATH")
-					paths := strings.Split(pathEnv, string(os.PathListSeparator))
-					found := false
-					for _, path := range paths {
-						fullPath := filepath.Join(path, cmd)
-						if _, err := os.Stat(fullPath); err == nil {
-							cacheCommandPath(cmd, fullPath)
-							found = true
-							executeExternalCommand(fullPath, args[1:], writer)
-							break
-						}
-					}
-					if !found {
-						fmt.Fprintf(writer, "%s: command not found\n", cmd)
-					}
-				}
-			}
-		}
-	}
+    // Execute built-in command
+    args := strings.Split(cmdLine, " ")
+    cmd := args[0]
 
-	// Display prompt again
-	updatePrompt()
+    // Check for aliases
+    if aliasCmd, ok := aliases[cmd]; ok {
+        cmd = aliasCmd
+        args = append([]string{cmd}, args[1:]...)
+    }
+
+    if builtins[cmd] {
+        executeBuiltinCommand(cmd, args[1:], writer)
+    } else {
+        // Check for background job
+        if strings.HasSuffix(cmdLine, "&") {
+            cmdLine = strings.TrimSuffix(cmdLine, "&")
+            args = strings.Fields(cmdLine)
+            cmd := exec.Command(args[0], args[1:]...)
+            cmd.Stdout = writer
+            cmd.Stderr = writer
+            err := cmd.Start()
+            if err == nil {
+                mu.Lock()
+                jobs = append(jobs, cmd)
+                mu.Unlock()
+                fmt.Fprintf(writer, "[%d] %d\n", len(jobs), cmd.Process.Pid)
+            } else {
+                fmt.Fprintf(writer, "%s: %v\n", cmd.Args[0], err)
+            }
+        } else {
+            // Check for redirection
+            if strings.Contains(cmdLine, ">") || strings.Contains(cmdLine, "<") {
+                executeRedirectedCommand(cmdLine, writer)
+            } else {
+                // Search for the command in PATH and execute it
+                if path, found := getCachedCommandPath(cmd); found {
+                    executeExternalCommand(path, args[1:], writer)
+                } else {
+                    pathEnv := os.Getenv("PATH")
+                    paths := strings.Split(pathEnv, string(os.PathListSeparator))
+                    found := false
+                    for _, path := range paths {
+                        fullPath := filepath.Join(path, cmd)
+                        if _, err := os.Stat(fullPath); err == nil {
+                            cacheCommandPath(cmd, fullPath)
+                            found = true
+                            executeExternalCommand(fullPath, args[1:], writer)
+                            break
+                        }
+                    }
+                    if !found {
+                        fmt.Fprintf(writer, "%s: command not found\n", cmd)
+                    }
+                }
+            }
+        }
+    }
+
+    // Display prompt again
+    updatePrompt()
 }
+
+
 
 // executeBuiltinCommand executes built-in shell commands.
 func executeBuiltinCommand(cmd string, args []string, writer io.Writer) {
@@ -321,8 +397,14 @@ func executeBuiltinCommand(cmd string, args []string, writer io.Writer) {
 			return
 		}
 		for _, file := range files {
-			fmt.Fprintln(writer, file.Name())
-		}
+			info, err := file.Info()
+			if err != nil {
+				continue
+			}
+			modTime := info.ModTime().Format("Jan 02 15:04")
+			size := info.Size()
+			fmt.Fprintf(writer, "%-20s %10d %s\n", file.Name(), size, modTime)
+		}	
 	case "cat":
 		if len(args) > 0 {
 			for _, file := range args {
@@ -412,6 +494,12 @@ func executeBuiltinCommand(cmd string, args []string, writer io.Writer) {
 				}
 			}
 		}
+	case "help":
+		fmt.Fprintln(writer, "Available commands:")
+		for cmd := range builtins {
+			fmt.Fprintf(writer, "  %s\n", cmd)
+		}
+		fmt.Fprintln(writer, "Use `man <command>` for more information on a command.")
 	case "unalias":
 		if len(args) > 0 {
 			for _, alias := range args {
@@ -566,7 +654,15 @@ func executeExternalCommand(path string, args []string, writer io.Writer) {
 	cmd.Stdout = writer
 	cmd.Stderr = writer
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(writer, "%s: %v\n", cmd.Args[0], err)
+		if exitError, ok := err.(*exec.ExitError); ok {
+			fmt.Fprintf(writer, "%s: %v\n", cmd.Args[0], exitError)
+		} else if os.IsPermission(err) {
+			fmt.Fprintf(writer, "%s: permission denied\n", cmd.Args[0])
+		} else if os.IsNotExist(err) {
+			fmt.Fprintf(writer, "%s: command not found\n", cmd.Args[0])
+		} else {
+			fmt.Fprintf(writer, "%s: %v\n", cmd.Args[0], err)
+		}
 	}
 }
 

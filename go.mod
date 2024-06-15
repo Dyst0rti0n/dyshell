@@ -8,6 +8,7 @@ require (
 )
 
 require (
+	github.com/chzyer/readline v1.5.1
 	github.com/gdamore/encoding v1.0.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/mattn/go-runewidth v0.0.15 // indirect
