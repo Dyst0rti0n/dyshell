@@ -24,12 +24,12 @@ var (
 	history         []string
 	aliases         map[string]string
 	envVars         map[string]string
-	builtins        map[string]bool
+	builtins        map[string]func([]string, io.Writer)
 	jobs            []*exec.Cmd
 	mu              sync.Mutex
 	commandCache    map[string]string
 	cacheExpiration time.Duration = 5 * time.Minute
-	completer 		*readline.PrefixCompleter
+	completer       *readline.PrefixCompleter
 
 	// Customization variables
 	shellBgOpacity   int
@@ -43,56 +43,34 @@ var (
 	input    string
 )
 
-func getAllCommands() []string {
-    commands := make([]string, 0, len(builtins))
-
-    for cmd := range builtins {
-        commands = append(commands, cmd)
-    }
-
-    pathEnv := os.Getenv("PATH")
-    paths := strings.Split(pathEnv, string(os.PathListSeparator))
-    for _, path := range paths {
-        files, err := os.ReadDir(path)
-        if err != nil {
-            continue
-        }
-        for _, file := range files {
-            commands = append(commands, file.Name())
-        }
-    }
-
-    return commands
-}
-
 func init() {
 	aliases = make(map[string]string)
 	envVars = make(map[string]string)
 	commandCache = make(map[string]string)
-	builtins = map[string]bool{
-		"echo":    true,
-		"exit":    true,
-		"type":    true,
-		"pwd":     true,
-		"cd":      true,
-		"whoami":  true,
-		"ls":      true,
-		"cat":     true,
-		"touch":   true,
-		"rm":      true,
-		"mkdir":   true,
-		"rmdir":   true,
-		"history": true,
-		"clear":   true,
-		"alias":   true,
-		"unalias": true,
-		"export":  true,
-		"unset":   true,
-		"jobs":    true,
-		"fg":      true,
-		"bg":      true,
-		"kill":    true,
-		"shell":   true, // Added shell customization command
+	builtins = map[string]func([]string, io.Writer){
+		"echo":    echoCommand,
+		"exit":    exitCommand,
+		"type":    typeCommand,
+		"pwd":     pwdCommand,
+		"cd":      cdCommand,
+		"whoami":  whoamiCommand,
+		"ls":      lsCommand,
+		"cat":     catCommand,
+		"touch":   touchCommand,
+		"rm":      rmCommand,
+		"mkdir":   mkdirCommand,
+		"rmdir":   rmdirCommand,
+		"history": historyCommand,
+		"clear":   clearCommand,
+		"alias":   aliasCommand,
+		"unalias": unaliasCommand,
+		"export":  exportCommand,
+		"unset":   unsetCommand,
+		"jobs":    jobsCommand,
+		"fg":      fgCommand,
+		"bg":      bgCommand,
+		"kill":    killCommand,
+		"shell":   shellCustomizationCommand,
 	}
 
 	// Default customization settings
@@ -103,25 +81,11 @@ func init() {
 	shellPromptStyle = "default"
 
 	completer = readline.NewPrefixCompleter()
-    for _, cmd := range getAllCommands() {
-        completer.Children = append(completer.Children, readline.PcItem(cmd))
-    }
-	
-	go startCPUProfile()
-}
+	for _, cmd := range getAllCommands() {
+		completer.Children = append(completer.Children, readline.PcItem(cmd))
+	}
 
-func startCPUProfile() {
-	f, err := os.Create("cpu.prof")
-	if err != nil {
-		fmt.Println("could not create CPU profile: ", err)
-		return
-	}
-	if err := pprof.StartCPUProfile(f); err != nil {
-		fmt.Println("could not start CPU profile: ", err)
-		return
-	}
-	time.Sleep(30 * time.Second)
-	pprof.StopCPUProfile()
+	go startCPUProfile()
 }
 
 func main() {
@@ -205,6 +169,28 @@ func main() {
 	}
 }
 
+func getAllCommands() []string {
+	commands := make([]string, 0, len(builtins))
+
+	for cmd := range builtins {
+		commands = append(commands, cmd)
+	}
+
+	pathEnv := os.Getenv("PATH")
+	paths := strings.Split(pathEnv, string(os.PathListSeparator))
+	for _, path := range paths {
+		files, err := os.ReadDir(path)
+		if err != nil {
+			continue
+		}
+		for _, file := range files {
+			commands = append(commands, file.Name())
+		}
+	}
+
+	return commands
+}
+
 func updatePrompt() {
 	currentDir, err := os.Getwd()
 	if err != nil {
@@ -212,7 +198,6 @@ func updatePrompt() {
 	}
 	textView.Clear()
 	fmt.Fprintf(textView, "%s %s%s_", currentDir, getPrompt(), input) // Added cursor indicator "_"
-	app.Draw() // Explicitly draw the application
 }
 
 func getPrompt() string {
@@ -220,376 +205,414 @@ func getPrompt() string {
 }
 
 func handleCommand(cmdLine string) {
-    fmt.Fprintf(textView, "Executing command: %s\n", cmdLine) // Debugging statement
-    cmdLine = strings.TrimSpace(cmdLine)
-    if cmdLine == "" {
-        updatePrompt()
-        return
-    }
+	fmt.Fprintf(textView, "Executing command: %s\n", cmdLine) // Debugging statement
+	cmdLine = strings.TrimSpace(cmdLine)
+	if cmdLine == "" {
+		updatePrompt()
+		return
+	}
 
-    // Save command to history
-    mu.Lock()
-    history = append(history, cmdLine)
-    mu.Unlock()
+	// Save command to history
+	mu.Lock()
+	history = append(history, cmdLine)
+	mu.Unlock()
 
-    // Perform command substitution
-    cmdLine = substituteCommand(cmdLine)
+	// Perform command substitution
+	cmdLine = substituteCommand(cmdLine)
 
-    // Expand environment variables
-    cmdLine = os.ExpandEnv(cmdLine)
+	// Expand environment variables
+	cmdLine = os.ExpandEnv(cmdLine)
 
-    // Check for multiline command
-    if strings.HasSuffix(cmdLine, "\\") {
-        input += "\n"
-        updatePrompt()
-        return
-    }
+	// Check for multiline command
+	if strings.HasSuffix(cmdLine, "\\") {
+		input += "\n"
+		updatePrompt()
+		return
+	}
 
-    // Check for piped commands
-    if strings.Contains(cmdLine, "|") {
-        executePipedCommands(cmdLine)
-        updatePrompt()
-        return
-    }
+	// Check for piped commands
+	if strings.Contains(cmdLine, "|") {
+		executePipedCommands(cmdLine)
+		updatePrompt()
+		return
+	}
 
-    // Capture output
-    output := new(strings.Builder)
-    writer := io.MultiWriter(output, textView)
+	// Capture output
+	output := new(strings.Builder)
+	writer := io.MultiWriter(output, textView)
 
-    // Execute built-in command
-    args := strings.Split(cmdLine, " ")
-    cmd := args[0]
+	// Execute built-in command
+	args := strings.Split(cmdLine, " ")
+	cmd := args[0]
 
-    // Check for aliases
-    if aliasCmd, ok := aliases[cmd]; ok {
-        cmd = aliasCmd
-        args = append([]string{cmd}, args[1:]...)
-    }
+	// Check for aliases
+	if aliasCmd, ok := aliases[cmd]; ok {
+		cmd = aliasCmd
+		args = append([]string{cmd}, args[1:]...)
+	}
 
-    if builtins[cmd] {
-        executeBuiltinCommand(cmd, args[1:], writer)
-    } else {
-        // Check for background job
-        if strings.HasSuffix(cmdLine, "&") {
-            cmdLine = strings.TrimSuffix(cmdLine, "&")
-            args = strings.Fields(cmdLine)
-            cmd := exec.Command(args[0], args[1:]...)
-            cmd.Stdout = writer
-            cmd.Stderr = writer
-            err := cmd.Start()
-            if err == nil {
-                mu.Lock()
-                jobs = append(jobs, cmd)
-                mu.Unlock()
-                fmt.Fprintf(writer, "[%d] %d\n", len(jobs), cmd.Process.Pid)
-            } else {
-                fmt.Fprintf(writer, "%s: %v\n", cmd.Args[0], err)
-            }
-        } else {
-            // Check for redirection
-            if strings.Contains(cmdLine, ">") || strings.Contains(cmdLine, "<") {
-                executeRedirectedCommand(cmdLine, writer)
-            } else {
-                // Search for the command in PATH and execute it
-                if path, found := getCachedCommandPath(cmd); found {
-                    executeExternalCommand(path, args[1:], writer)
-                } else {
-                    pathEnv := os.Getenv("PATH")
-                    paths := strings.Split(pathEnv, string(os.PathListSeparator))
-                    found := false
-                    for _, path := range paths {
-                        fullPath := filepath.Join(path, cmd)
-                        if _, err := os.Stat(fullPath); err == nil {
-                            cacheCommandPath(cmd, fullPath)
-                            found = true
-                            executeExternalCommand(fullPath, args[1:], writer)
-                            break
-                        }
-                    }
-                    if !found {
-                        fmt.Fprintf(writer, "%s: command not found\n", cmd)
-                    }
-                }
-            }
-        }
-    }
-
-    // Display prompt again
-    updatePrompt()
-}
-
-
-
-// executeBuiltinCommand executes built-in shell commands.
-func executeBuiltinCommand(cmd string, args []string, writer io.Writer) {
-	switch cmd {
-	case "echo":
-		fmt.Fprintln(writer, strings.Join(args, " "))
-	case "exit":
-		saveAliasesAndEnvVars(filepath.Join(userHomeDir(), ".my_shell_aliases"))
-		saveEnvVars(filepath.Join(userHomeDir(), ".my_shell_env"))
-		os.Exit(0)
-	case "type":
-		if len(args) > 0 {
-			arg := args[0]
-			if builtins[arg] {
-				fmt.Fprintf(writer, "%s is a shell builtin\n", arg)
+	if builtinFunc, ok := builtins[cmd]; ok {
+		builtinFunc(args[1:], writer)
+	} else {
+		// Check for background job
+		if strings.HasSuffix(cmdLine, "&") {
+			cmdLine = strings.TrimSuffix(cmdLine, "&")
+			args = strings.Fields(cmdLine)
+			cmd := exec.Command(args[0], args[1:]...)
+			cmd.Stdout = writer
+			cmd.Stderr = writer
+			err := cmd.Start()
+			if err == nil {
+				mu.Lock()
+				jobs = append(jobs, cmd)
+				mu.Unlock()
+				fmt.Fprintf(writer, "[%d] %d\n", len(jobs), cmd.Process.Pid)
 			} else {
-				path, found := getCachedCommandPath(arg)
-				if found {
-					fmt.Fprintf(writer, "%s is %s\n", arg, path)
+				fmt.Fprintf(writer, "%s: %v\n", cmd.Args[0], err)
+			}
+		} else {
+			// Check for redirection
+			if strings.Contains(cmdLine, ">") || strings.Contains(cmdLine, "<") {
+				executeRedirectedCommand(cmdLine, writer)
+			} else {
+				// Search for the command in PATH and execute it
+				if path, found := getCachedCommandPath(cmd); found {
+					executeExternalCommand(path, args[1:], writer)
 				} else {
 					pathEnv := os.Getenv("PATH")
 					paths := strings.Split(pathEnv, string(os.PathListSeparator))
 					found := false
 					for _, path := range paths {
-						fullPath := filepath.Join(path, arg)
+						fullPath := filepath.Join(path, cmd)
 						if _, err := os.Stat(fullPath); err == nil {
-							fmt.Fprintf(writer, "%s is %s\n", arg, fullPath)
-							cacheCommandPath(arg, fullPath)
+							cacheCommandPath(cmd, fullPath)
 							found = true
+							executeExternalCommand(fullPath, args[1:], writer)
 							break
 						}
 					}
 					if !found {
-						fmt.Fprintf(writer, "%s not found\n", arg)
+						fmt.Fprintf(writer, "%s: command not found\n", cmd)
 					}
 				}
 			}
 		}
-	case "pwd":
-		dir, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintf(writer, "Error: %v\n", err)
+	}
+
+	// Display prompt again
+	updatePrompt()
+}
+
+func executeBuiltinCommand(cmd string, args []string, writer io.Writer) {
+	if builtinFunc, ok := builtins[cmd]; ok {
+		builtinFunc(args, writer)
+	} else {
+		fmt.Fprintf(writer, "%s: command not found\n", cmd)
+	}
+}
+
+// Builtin command implementations
+func echoCommand(args []string, writer io.Writer) {
+	fmt.Fprintln(writer, strings.Join(args, " "))
+}
+
+func exitCommand(args []string, writer io.Writer) {
+	saveAliasesAndEnvVars(filepath.Join(userHomeDir(), ".my_shell_aliases"))
+	saveEnvVars(filepath.Join(userHomeDir(), ".my_shell_env"))
+	os.Exit(0)
+}
+
+func typeCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		arg := args[0]
+		if _, ok := builtins[arg]; ok {
+			fmt.Fprintf(writer, "%s is a shell builtin\n", arg)
+		} else if path, found := getCachedCommandPath(arg); found {
+			fmt.Fprintf(writer, "%s is %s\n", arg, path)
 		} else {
-			fmt.Fprintln(writer, dir)
-		}
-	case "cd":
-		if len(args) > 0 {
-			dir := args[0]
-			if dir == "~" {
-				dir = userHomeDir()
+			pathEnv := os.Getenv("PATH")
+			paths := strings.Split(pathEnv, string(os.PathListSeparator))
+			found := false
+			for _, path := range paths {
+				fullPath := filepath.Join(path, arg)
+				if _, err := os.Stat(fullPath); err == nil {
+					fmt.Fprintf(writer, "%s is %s\n", arg, fullPath)
+					cacheCommandPath(arg, fullPath)
+					found = true
+					break
+				}
 			}
-			err := os.Chdir(dir)
-			if err != nil {
-				fmt.Fprintf(writer, "cd: %s: No such file or directory\n", dir)
+			if !found {
+				fmt.Fprintf(writer, "%s not found\n", arg)
 			}
-			updatePrompt() // Add this line to update the prompt after changing directory
-		} else {
-			os.Chdir(userHomeDir())
-			updatePrompt() // Add this line to update the prompt after changing directory
 		}
-	case "whoami":
-		user, err := user.Current()
+	}
+}
+
+func pwdCommand(args []string, writer io.Writer) {
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(writer, "Error: %v\n", err)
+	} else {
+		fmt.Fprintln(writer, dir)
+	}
+}
+
+func cdCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		dir := args[0]
+		if dir == "~" {
+			dir = userHomeDir()
+		}
+		err := os.Chdir(dir)
 		if err != nil {
-			fmt.Fprintf(writer, "Error: %v\n", err)
-		} else {
-			fmt.Fprintln(writer, user.Username)
+			fmt.Fprintf(writer, "cd: %s: No such file or directory\n", dir)
 		}
-	case "ls":
-		path := "."
-		if len(args) > 0 {
-			path = args[0]
-		}
-		files, err := os.ReadDir(path)
+		updatePrompt()
+	} else {
+		os.Chdir(userHomeDir())
+		updatePrompt()
+	}
+}
+
+func whoamiCommand(args []string, writer io.Writer) {
+	user, err := user.Current()
+	if err != nil {
+		fmt.Fprintf(writer, "Error: %v\n", err)
+	} else {
+		fmt.Fprintln(writer, user.Username)
+	}
+}
+
+func lsCommand(args []string, writer io.Writer) {
+	path := "."
+	if len(args) > 0 {
+		path = args[0]
+	}
+	files, err := os.ReadDir(path)
+	if err != nil {
+		fmt.Fprintf(writer, "ls: cannot access '%s': %v\n", path, err)
+		return
+	}
+	for _, file := range files {
+		info, err := file.Info()
 		if err != nil {
-			fmt.Fprintf(writer, "ls: cannot access '%s': %v\n", path, err)
-			return
+			continue
 		}
-		for _, file := range files {
-			info, err := file.Info()
+		modTime := info.ModTime().Format("Jan 02 15:04")
+		size := info.Size()
+		fmt.Fprintf(writer, "%-20s %10d %s\n", file.Name(), size, modTime)
+	}
+}
+
+func catCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		for _, file := range args {
+			data, err := os.ReadFile(file)
 			if err != nil {
+				fmt.Fprintf(writer, "cat: cannot read '%s': %v\n", file, err)
 				continue
 			}
-			modTime := info.ModTime().Format("Jan 02 15:04")
-			size := info.Size()
-			fmt.Fprintf(writer, "%-20s %10d %s\n", file.Name(), size, modTime)
-		}	
-	case "cat":
-		if len(args) > 0 {
-			for _, file := range args {
-				data, err := os.ReadFile(file)
-				if err != nil {
-					fmt.Fprintf(writer, "cat: cannot read '%s': %v\n", file, err)
-					continue
-				}
-				fmt.Fprint(writer, string(data))
-			}
-		} else {
-			fmt.Fprintln(writer, "cat: missing file operand")
+			fmt.Fprint(writer, string(data))
 		}
-	case "touch":
-		if len(args) > 0 {
-			for _, file := range args {
-				f, err := os.Create(file)
-				if err != nil {
-					fmt.Fprintf(writer, "touch: cannot create '%s': %v\n", file, err)
-					continue
-				}
-				f.Close()
+	} else {
+		fmt.Fprintln(writer, "cat: missing file operand")
+	}
+}
+
+func touchCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		for _, file := range args {
+			f, err := os.Create(file)
+			if err != nil {
+				fmt.Fprintf(writer, "touch: cannot create '%s': %v\n", file, err)
+				continue
 			}
-		} else {
-			fmt.Fprintln(writer, "touch: missing file operand")
+			f.Close()
 		}
-	case "rm":
-		if len(args) > 0 {
-			for _, file := range args {
-				err := os.Remove(file)
-				if err != nil {
-					fmt.Fprintf(writer, "rm: cannot remove '%s': %v\n", file, err)
-					continue
-				}
+	} else {
+		fmt.Fprintln(writer, "touch: missing file operand")
+	}
+}
+
+func rmCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		for _, file := range args {
+			err := os.Remove(file)
+			if err != nil {
+				fmt.Fprintf(writer, "rm: cannot remove '%s': %v\n", file, err)
+				continue
 			}
-		} else {
-			fmt.Fprintln(writer, "rm: missing file operand")
 		}
-	case "mkdir":
-		if len(args) > 0 {
-			for _, dir := range args {
-				err := os.Mkdir(dir, 0755)
-				if err != nil {
-					fmt.Fprintf(writer, "mkdir: cannot create directory '%s': %v\n", dir, err)
-					continue
-				}
+	} else {
+		fmt.Fprintln(writer, "rm: missing file operand")
+	}
+}
+
+func mkdirCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		for _, dir := range args {
+			err := os.Mkdir(dir, 0755)
+			if err != nil {
+				fmt.Fprintf(writer, "mkdir: cannot create directory '%s': %v\n", dir, err)
+				continue
 			}
-		} else {
-			fmt.Fprintln(writer, "mkdir: missing directory operand")
 		}
-	case "rmdir":
-		if len(args) > 0 {
-			for _, dir := range args {
-				err := os.Remove(dir)
-				if err != nil {
-					fmt.Fprintf(writer, "rmdir: cannot remove directory '%s': %v\n", dir, err)
-					continue
-				}
+	} else {
+		fmt.Fprintln(writer, "mkdir: missing directory operand")
+	}
+}
+
+func rmdirCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		for _, dir := range args {
+			err := os.Remove(dir)
+			if err != nil {
+				fmt.Fprintf(writer, "rmdir: cannot remove directory '%s': %v\n", dir, err)
+				continue
 			}
-		} else {
-			fmt.Fprintln(writer, "rmdir: missing directory operand")
 		}
-	case "history":
+	} else {
+		fmt.Fprintln(writer, "rmdir: missing directory operand")
+	}
+}
+
+func historyCommand(args []string, writer io.Writer) {
+	mu.Lock()
+	for i, cmd := range history {
+		fmt.Fprintf(writer, "%d %s\n", i+1, cmd)
+	}
+	mu.Unlock()
+}
+
+func clearCommand(args []string, writer io.Writer) {
+	cmd := exec.Command("clear")
+	cmd.Stdout = writer
+	cmd.Run()
+}
+
+func aliasCommand(args []string, writer io.Writer) {
+	if len(args) == 0 {
 		mu.Lock()
-		for i, cmd := range history {
-			fmt.Fprintf(writer, "%d %s\n", i+1, cmd)
+		for k, v := range aliases {
+			fmt.Fprintf(writer, "alias %s='%s'\n", k, v)
 		}
 		mu.Unlock()
-	case "clear":
-		cmd := exec.Command("clear")
-		cmd.Stdout = writer
-		cmd.Run()
-	case "alias":
-		if len(args) == 0 {
+	} else {
+		for _, alias := range args {
+			parts := strings.SplitN(alias, "=", 2)
+			if len(parts) == 2 {
+				mu.Lock()
+				aliases[parts[0]] = strings.Trim(parts[1], "'\"")
+				mu.Unlock()
+			}
+		}
+	}
+}
+
+func unaliasCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		for _, alias := range args {
 			mu.Lock()
-			for k, v := range aliases {
-				fmt.Fprintf(writer, "alias %s='%s'\n", k, v)
-			}
+			delete(aliases, alias)
 			mu.Unlock()
+		}
+	}
+}
+
+func exportCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		for _, envVar := range args {
+			parts := strings.SplitN(envVar, "=", 2)
+			if len(parts) == 2 {
+				os.Setenv(parts[0], parts[1])
+				mu.Lock()
+				envVars[parts[0]] = parts[1]
+				mu.Unlock()
+			}
+		}
+	}
+}
+
+func unsetCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		for _, envVar := range args {
+			os.Unsetenv(envVar)
+			mu.Lock()
+			delete(envVars, envVar)
+			mu.Unlock()
+		}
+	}
+}
+
+func jobsCommand(args []string, writer io.Writer) {
+	mu.Lock()
+	for i, job := range jobs {
+		fmt.Fprintf(writer, "[%d]+  %d Running    %s\n", i+1, job.Process.Pid, strings.Join(job.Args, " "))
+	}
+	mu.Unlock()
+}
+
+func fgCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		jobNumber, err := strconv.Atoi(args[0])
+		if err == nil && jobNumber > 0 && jobNumber <= len(jobs) {
+			mu.Lock()
+			job := jobs[jobNumber-1]
+			mu.Unlock()
+			job.Wait()
 		} else {
-			for _, alias := range args {
-				parts := strings.SplitN(alias, "=", 2)
-				if len(parts) == 2 {
-					mu.Lock()
-					aliases[parts[0]] = strings.Trim(parts[1], "'\"")
-					mu.Unlock()
-				}
+			fmt.Fprintf(writer, "fg: %s: no such job\n", args[0])
+		}
+	}
+}
+
+func bgCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		jobNumber, err := strconv.Atoi(args[0])
+		if err == nil && jobNumber > 0 && jobNumber <= len(jobs) {
+			mu.Lock()
+			job := jobs[jobNumber-1]
+			mu.Unlock()
+			var _ *exec.Cmd = job
+			err := sendSignalContinue()
+			if err != nil {
+				fmt.Fprintf(writer, "Failed to send continue signal: %v\n", err)
 			}
+		} else {
+			fmt.Fprintf(writer, "bg: %s: no such job\n", args[0])
 		}
-	case "help":
-		fmt.Fprintln(writer, "Available commands:")
-		for cmd := range builtins {
-			fmt.Fprintf(writer, "  %s\n", cmd)
-		}
-		fmt.Fprintln(writer, "Use `man <command>` for more information on a command.")
-	case "unalias":
-		if len(args) > 0 {
-			for _, alias := range args {
-				mu.Lock()
-				delete(aliases, alias)
-				mu.Unlock()
-			}
-		}
-	case "export":
-		if len(args) > 0 {
-			for _, envVar := range args {
-				parts := strings.SplitN(envVar, "=", 2)
-				if len(parts) == 2 {
-					os.Setenv(parts[0], parts[1])
-					mu.Lock()
-					envVars[parts[0]] = parts[1]
-					mu.Unlock()
-				}
-			}
-		}
-	case "unset":
-		if len(args) > 0 {
-			for _, envVar := range args {
-				os.Unsetenv(envVar)
-				mu.Lock()
-				delete(envVars, envVar)
-				mu.Unlock()
-			}
-		}
-	case "jobs":
-		mu.Lock()
-		for i, job := range jobs {
-			fmt.Fprintf(writer, "[%d]+  %d Running    %s\n", i+1, job.Process.Pid, strings.Join(job.Args, " "))
-		}
-		mu.Unlock()
-	case "fg":
-		if len(args) > 0 {
-			jobNumber, err := strconv.Atoi(args[0])
-			if err == nil && jobNumber > 0 && jobNumber <= len(jobs) {
-				mu.Lock()
-				job := jobs[jobNumber-1]
-				mu.Unlock()
-				job.Wait()
-			} else {
-				fmt.Fprintf(writer, "fg: %s: no such job\n", args[0])
-			}
-		}
-	case "bg":
-		if len(args) > 0 {
-			jobNumber, err := strconv.Atoi(args[0])
-			if err == nil && jobNumber > 0 && jobNumber <= len(jobs) {
-				mu.Lock()
-				job := jobs[jobNumber-1]
-				mu.Unlock()
-				var _ *exec.Cmd = job
-				err := sendSignalContinue()
-				if err != nil {
-					fmt.Fprintf(writer, "Failed to send continue signal: %v\n", err)
-				}
-			} else {
-				fmt.Fprintf(writer, "bg: %s: no such job\n", args[0])
-			}
-		}
-	case "kill":
-		if len(args) > 0 {
-			pid, err := strconv.Atoi(args[0])
+	}
+}
+
+func killCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		pid, err := strconv.Atoi(args[0])
+		if err == nil {
+			process, err := os.FindProcess(pid)
 			if err == nil {
-				process, err := os.FindProcess(pid)
+				err = process.Kill()
 				if err == nil {
-					err = process.Kill()
-					if err == nil {
-						fmt.Fprintf(writer, "Process %d killed\n", pid)
-					} else {
-						fmt.Fprintf(writer, "Failed to kill process %d: %v\n", pid, err)
-					}
+					fmt.Fprintf(writer, "Process %d killed\n", pid)
 				} else {
-					fmt.Fprintf(writer, "Failed to find process %d: %v\n", pid, err)
+					fmt.Fprintf(writer, "Failed to kill process %d: %v\n", pid, err)
 				}
 			} else {
-				fmt.Fprintf(writer, "Invalid PID: %s\n", args[0])
+				fmt.Fprintf(writer, "Failed to find process %d: %v\n", pid, err)
 			}
 		} else {
-			fmt.Fprintln(writer, "kill: missing PID operand")
+			fmt.Fprintf(writer, "Invalid PID: %s\n", args[0])
 		}
-	case "shell":
-		if len(args) > 0 {
-			handleShellCustomization(args, writer)
-		} else {
-			printShellCustomization(writer)
-		}
+	} else {
+		fmt.Fprintln(writer, "kill: missing PID operand")
+	}
+}
+
+func shellCustomizationCommand(args []string, writer io.Writer) {
+	if len(args) > 0 {
+		handleShellCustomization(args, writer)
+	} else {
+		printShellCustomization(writer)
 	}
 }
 
@@ -901,4 +924,18 @@ func userHomeDir() string {
 		return ""
 	}
 	return user.HomeDir
+}
+
+func startCPUProfile() {
+	f, err := os.Create("cpu.prof")
+	if err != nil {
+		fmt.Println("could not create CPU profile: ", err)
+		return
+	}
+	if err := pprof.StartCPUProfile(f); err != nil {
+		fmt.Println("could not start CPU profile: ", err)
+		return
+	}
+	time.Sleep(30 * time.Second)
+	pprof.StopCPUProfile()
 }
