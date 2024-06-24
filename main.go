@@ -120,6 +120,7 @@ func main() {
 		switch event.Key() {
 		case tcell.KeyEnter:
 			cmdLine := strings.TrimSpace(input)
+			fmt.Fprintln(textView, "") // Add newline before handling command
 			input = ""
 			handleCommand(cmdLine)
 		case tcell.KeyBackspace, tcell.KeyBackspace2:
@@ -195,8 +196,9 @@ func updatePrompt() {
 	if err != nil {
 		currentDir = "~"
 	}
-	// Only append the prompt and input
-	fmt.Fprintf(textView, "\r%s %s%s_", currentDir, getPrompt(), input)
+	// Clear current line and set prompt and input
+	textView.Clear()
+	fmt.Fprintf(textView, "%s %s%s_", currentDir, getPrompt(), input)
 }
 
 func getPrompt() string {
@@ -295,7 +297,7 @@ func handleCommand(cmdLine string) {
 	}
 
 	fmt.Fprintln(textView, output.String()) // Print output to the text view and ensure newline
-	fmt.Fprintln(textView, "") // Ensure newline after the command execution
+	fmt.Fprintln(textView, "")              // Ensure newline after the command execution
 	// Display prompt again
 	updatePrompt()
 }
