@@ -121,7 +121,6 @@ func main() {
 		case tcell.KeyEnter:
 			cmdLine := strings.TrimSpace(input)
 			input = ""
-			fmt.Fprint(textView, "\n") // Add newline before handling command
 			handleCommand(cmdLine)
 		case tcell.KeyBackspace, tcell.KeyBackspace2:
 			if len(input) > 0 {
@@ -196,8 +195,8 @@ func updatePrompt() {
 	if err != nil {
 		currentDir = "~"
 	}
-	textView.Clear()
-	fmt.Fprintf(textView, "%s %s%s_", currentDir, getPrompt(), input) // Added cursor indicator "_"
+	// Only append the prompt and input
+	fmt.Fprintf(textView, "\r%s %s%s_", currentDir, getPrompt(), input)
 }
 
 func getPrompt() string {
@@ -205,7 +204,6 @@ func getPrompt() string {
 }
 
 func handleCommand(cmdLine string) {
-	fmt.Fprintf(textView, "Executing command: %s\n", cmdLine) // Debugging statement
 	cmdLine = strings.TrimSpace(cmdLine)
 	if cmdLine == "" {
 		updatePrompt()
@@ -233,6 +231,7 @@ func handleCommand(cmdLine string) {
 	// Check for piped commands
 	if strings.Contains(cmdLine, "|") {
 		executePipedCommands(cmdLine)
+		fmt.Fprintln(textView, "") // Ensure a newline is printed after execution
 		updatePrompt()
 		return
 	}
@@ -276,29 +275,27 @@ func handleCommand(cmdLine string) {
 				executeRedirectedCommand(cmdLine, writer)
 			} else {
 				// Search for the command in PATH and execute it
-				if path, found := getCachedCommandPath(cmd); found {
-					executeExternalCommand(path, args[1:], writer)
-				} else {
-					pathEnv := os.Getenv("PATH")
-					paths := strings.Split(pathEnv, string(os.PathListSeparator))
-					found := false
-					for _, path := range paths {
-						fullPath := filepath.Join(path, cmd)
-						if _, err := os.Stat(fullPath); err == nil {
-							cacheCommandPath(cmd, fullPath)
-							found = true
-							executeExternalCommand(fullPath, args[1:], writer)
-							break
-						}
+				pathEnv := os.Getenv("PATH")
+				paths := strings.Split(pathEnv, string(os.PathListSeparator))
+				found := false
+				for _, path := range paths {
+					fullPath := filepath.Join(path, cmd)
+					if _, err := os.Stat(fullPath); err == nil {
+						cacheCommandPath(cmd, fullPath)
+						executeExternalCommand(fullPath, args[1:], writer)
+						found = true
+						break
 					}
-					if !found {
-						fmt.Fprintf(writer, "%s: command not found\n", cmd)
-					}
+				}
+				if !found {
+					fmt.Fprintf(writer, "%s: command not found\n", cmd)
 				}
 			}
 		}
 	}
 
+	fmt.Fprintln(textView, output.String()) // Print output to the text view and ensure newline
+	fmt.Fprintln(textView, "") // Ensure newline after the command execution
 	// Display prompt again
 	updatePrompt()
 }
@@ -311,7 +308,6 @@ func executeBuiltinCommand(cmd string, args []string, writer io.Writer) {
 	}
 }
 
-// Builtin command implementations
 func echoCommand(args []string, writer io.Writer) {
 	fmt.Fprintln(writer, strings.Join(args, " "))
 }
@@ -689,7 +685,6 @@ func executeExternalCommand(path string, args []string, writer io.Writer) {
 	}
 }
 
-// Cache command path with expiration
 func cacheCommandPath(cmd, path string) {
 	mu.Lock()
 	commandCache[cmd] = path
@@ -708,7 +703,6 @@ func getCachedCommandPath(cmd string) (string, bool) {
 	return path, found
 }
 
-// loadEnvVars loads environment variables from a file.
 func loadEnvVars(filepath string) {
 	file, err := os.Open(filepath)
 	if err != nil {
@@ -729,7 +723,6 @@ func loadEnvVars(filepath string) {
 	}
 }
 
-// saveEnvVars saves environment variables to a file.
 func saveEnvVars(filepath string) {
 	file, err := os.Create(filepath)
 	if err != nil {
@@ -745,7 +738,6 @@ func saveEnvVars(filepath string) {
 	mu.Unlock()
 }
 
-// substituteCommand performs command substitution.
 func substituteCommand(cmdLine string) string {
 	for {
 		start := strings.Index(cmdLine, "$(")
@@ -766,10 +758,8 @@ func substituteCommand(cmdLine string) string {
 	return cmdLine
 }
 
-// AutoCompleter implements readline's AutoCompleter interface.
 type AutoCompleter struct{}
 
-// Do completes the given prefix and returns the suggestions.
 func (a *AutoCompleter) Do(line []rune, pos int) ([][]rune, int) {
 	var suggestions [][]rune
 	prefix := string(line[:pos])
@@ -794,7 +784,6 @@ func (a *AutoCompleter) Do(line []rune, pos int) ([][]rune, int) {
 	return suggestions, len(prefix)
 }
 
-// executePipedCommands executes piped commands.
 func executePipedCommands(cmdLine string) {
 	commands := strings.Split(cmdLine, "|")
 	var cmds []*exec.Cmd
@@ -814,9 +803,9 @@ func executePipedCommands(cmdLine string) {
 			stdout, _ := cmd.StdoutPipe()
 			lastStdout = stdout
 		} else {
-			cmd.Stdout = os.Stdout
+			cmd.Stdout = io.MultiWriter(os.Stdout, textView)
 		}
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = io.MultiWriter(os.Stderr, textView)
 		cmd.Start()
 	}
 	for _, cmd := range cmds {
@@ -865,7 +854,6 @@ func executeRedirectedCommand(cmdLine string, writer io.Writer) {
 	}
 }
 
-// loadAliasesAndEnvVars loads aliases and environment variables from a file.
 func loadAliasesAndEnvVars(filepath string) {
 	file, err := os.Open(filepath)
 	if err != nil {
@@ -893,7 +881,6 @@ func loadAliasesAndEnvVars(filepath string) {
 	}
 }
 
-// saveAliasesAndEnvVars saves aliases and environment variables to a file.
 func saveAliasesAndEnvVars(filepath string) {
 	file, err := os.Create(filepath)
 	if err != nil {
